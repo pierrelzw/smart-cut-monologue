@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Smart Cut — Review</title>
+<style>
+  :root {
+    --bg: #1a1a1f;
+    --panel: #22222a;
+    --panel-2: #2a2a33;
+    --border: #33333e;
+    --text: #e7e9ee;
+    --muted: #7d8088;
+    --accent: #4ac0b5;
+    --pill-cut: #8a6d2e;       /* active deletion pill (yellow/amber) */
+    --pill-cut-bg: #c9a155;
+    --pill-ghost: #3a3a45;     /* unchecked but visible */
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.8 -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif; }
+  .app { display: grid; grid-template-columns: 1fr 420px; height: 100vh; }
+
+  /* ========= LEFT pane ========= */
+  .left { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--border); }
+  .left header { padding: 12px 18px; display: flex; align-items: center; gap: 12px;
+    background: var(--panel); border-bottom: 1px solid var(--border); }
+  .left header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  .stats { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; flex: 1; }
+  .stats b { color: var(--text); font-weight: 600; }
+
+  .cats { padding: 10px 18px; background: var(--panel); border-bottom: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 6px; }
+  .cats-head { color: var(--muted); font-size: 12px; }
+  .cats-head b { color: var(--accent); font-weight: 600; }
+  .cat-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .cat-row input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
+  .cat-row .count { color: var(--accent); font-weight: 600; min-width: 24px; text-align: right; }
+  .cat-row .label { color: var(--text); }
+  .cat-row.disabled .label { color: var(--muted); }
+  .pause-thresh { margin-left: auto; display: flex; gap: 4px; align-items: center; color: var(--muted); font-size: 12px; }
+  .pause-thresh input { width: 56px; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px; font: inherit; }
+
+  .transcript { flex: 1; overflow-y: auto; padding: 16px 24px; user-select: none;
+    line-height: 2.0; }
+  .word { display: inline-block; padding: 0 2px; border-radius: 4px; cursor: pointer;
+    transition: background 0.1s, color 0.1s; }
+  .word:hover { background: rgba(255,255,255,0.05); }
+  .word.cut.active { background: var(--pill-cut-bg); color: #1a1a1f; padding: 2px 6px; margin: 0 1px;
+    font-weight: 500; }
+  .word.cut.inactive { background: transparent; color: var(--muted);
+    border: 1px dashed var(--pill-cut); padding: 1px 5px; margin: 0 1px; }
+  .word.playing { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .pause { display: inline-block; color: var(--muted); font-size: 12px;
+    background: var(--panel-2); padding: 2px 8px; border-radius: 10px; margin: 0 4px;
+    cursor: pointer; }
+  .pause.inactive { opacity: 0.35; }
+
+  footer { padding: 14px 18px; border-top: 1px solid var(--border); background: var(--panel);
+    display: flex; gap: 12px; align-items: center; }
+  .delete-btn { background: var(--accent); color: #1a1a1f; border: 0; padding: 10px 24px;
+    border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 14px; margin-left: auto; }
+  .delete-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .delete-btn.done { background: var(--panel-2); color: var(--muted); }
+
+  /* ========= RIGHT pane ========= */
+  .right { display: flex; flex-direction: column; background: #000; }
+  .right h2 { font-size: 12px; margin: 0; padding: 10px 14px; color: var(--muted);
+    background: var(--panel); border-bottom: 1px solid var(--border); }
+  video { width: 100%; flex: 1; background: #000; min-height: 0; }
+</style>
+</head>
+<body>
+<div class="app">
+  <section class="left">
+    <header>
+      <h1>剪口播</h1>
+      <span class="stats">
+        原 <b id="stat-orig">—</b>　剪后 <b id="stat-out">—</b>　删除 <b id="stat-del">—</b>
+      </span>
+    </header>
+
+    <div class="cats">
+      <div class="cats-head">识别到 <b id="total-count">0</b> 个无效词 <span style="color:#888;font-weight:normal;font-size:12px">（点字跳转・Shift+点/拖选词）</span></div>
+      <div id="cat-rows"></div>
+    </div>
+
+    <div class="transcript" id="transcript"></div>
+
+    <footer>
+      <span id="status" style="color: var(--muted); font-size: 12px;">
+        单击词选/取消；拖拽批量选。取消类别 checkbox 隐藏该类高亮且不删除。
+      </span>
+      <button class="delete-btn" id="confirm">删除</button>
+    </footer>
+  </section>
+
+  <section class="right">
+    <h2>播放器</h2>
+    <video id="vid" controls preload="metadata"></video>
+  </section>
+</div>
+
+<script>
+// ========= State =========
+let DATA = null;
+let wordChecked = [];       // bool per transcript word index
+let catVisible = {};        // category -> bool
+let pauseChecked = [];      // bool per pause-suggestion (aligned to pauseList below)
+let pauseMin = 0.8;         // minimum pause duration threshold
+let pauseList = [];         // suggestions filtered to category==='pause'
+let wordCategory = [];      // wi -> category string or null
+let playingWi = -1;
+
+// ========= Format =========
+const fmt = s => {
+  if (s == null || isNaN(s)) return "—";
+  const m = Math.floor(s / 60);
+  const ss = s - m * 60;
+  return `${m}:${ss.toFixed(1).padStart(4, "0")}`;
+};
+const esc = s => String(s).replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+// ========= Boot =========
+async function boot() {
+  DATA = await (await fetch("/data.json")).json();
+  document.getElementById("vid").src = "/video";
+  document.getElementById("stat-orig").textContent = fmt(DATA.manifest.duration);
+  initStateFromData();
+
+  renderCats();
+  renderTranscript();
+  updateStats();
+
+  // Video playback. Preview-skip runs on THREE triggers for robustness:
+  //   1. rAF loop while playing (~60Hz — catches short <250ms delete ranges)
+  //   2. timeupdate event (~4Hz — backup if rAF somehow stalls)
+  //   3. seeked event — fires after any currentTime change (including our
+  //      click-to-seek), so clicking a still-checked word immediately jumps
+  //      out, giving the user visible confirmation the skip is working.
+  const vid = document.getElementById("vid");
+  vid.addEventListener("timeupdate", () => { syncHighlight(); previewSkip(); });
+  vid.addEventListener("seeked", previewSkip);
+  let rafId = null;
+  function tick() {
+    if (vid.paused || vid.ended) { rafId = null; return; }
+    previewSkip();
+    rafId = requestAnimationFrame(tick);
+  }
+  vid.addEventListener("play", () => { if (rafId == null) tick(); });
+  vid.addEventListener("pause", () => { if (rafId != null) { cancelAnimationFrame(rafId); rafId = null; } });
+
+  // Confirm
+  document.getElementById("confirm").addEventListener("click", confirmCuts);
+
+  // Transcript interaction: click = seek + toggle; drag = batch toggle.
+  // Non-cut-eligible words (plain transcript text) still seek on click but
+  // can't be toggled (they're not marked as deletable by any suggestion).
+  const tr = document.getElementById("transcript");
+  let dragAnchor = null;   // {newState, moved}
+  tr.addEventListener("mousedown", e => {
+    const word = e.target.closest(".word");
+    const pause = e.target.closest(".pause");
+    // Shift = select/toggle (+ drag). Plain click = seek only. This split
+    // keeps "click to jump the playhead" cheap while still letting users
+    // pick arbitrary spans to cut — including plain words suggestions missed.
+    if (word) {
+      const wi = parseInt(word.dataset.wi);
+      if (e.shiftKey) {
+        // Pure selection — don't seek, otherwise the seeked-event preview
+        // skip immediately jumps the playhead away and the user can't see
+        // what they just selected (and can't drag further).
+        const cat = wordCategory[wi];
+        if (!cat || catVisible[cat]) {
+          const newState = !wordChecked[wi];
+          wordChecked[wi] = newState;
+          dragAnchor = { newState, moved: false };
+          refreshWord(wi);
+          updateStats();
+        }
+      } else {
+        vid.currentTime = DATA.transcript.segments[wi].start;
+      }
+    } else if (pause) {
+      const pi = parseInt(pause.dataset.pi);
+      if (e.shiftKey) {
+        if (catVisible.pause) {
+          pauseChecked[pi] = !pauseChecked[pi];
+          pause.classList.toggle("inactive", !pauseChecked[pi]);
+          updateStats();
+        }
+      } else {
+        vid.currentTime = pauseList[pi].start;
+      }
+    }
+    e.preventDefault();
+  });
+  tr.addEventListener("mouseover", e => {
+    if (!dragAnchor) return;
+    const word = e.target.closest(".word");
+    if (!word) return;
+    const wi = parseInt(word.dataset.wi);
+    const cat = wordCategory[wi];
+    if (cat && !catVisible[cat]) return;  // hidden category — skip
+    if (wordChecked[wi] !== dragAnchor.newState) {
+      wordChecked[wi] = dragAnchor.newState;
+      dragAnchor.moved = true;
+      refreshWord(wi);
+      updateStats();
+    }
+  });
+  window.addEventListener("mouseup", () => { dragAnchor = null; });
+}
+
+// ========= Render =========
+function renderCats() {
+  const cats = DATA.suggestions.categories;
+  const host = document.getElementById("cat-rows");
+  host.innerHTML = "";
+  const order = ["filler", "repeat", "padding", "pause"];
+  let total = 0;
+  for (const c of order) {
+    const meta = cats[c];
+    if (!meta) continue;
+    total += meta.count;
+    const row = document.createElement("label");
+    row.className = "cat-row" + (catVisible[c] ? "" : " disabled");
+    row.innerHTML = `
+      <input type="checkbox" ${catVisible[c] ? "checked" : ""} data-cat="${c}">
+      <span class="count">${meta.count}</span>
+      <span class="label">${meta.label}</span>`;
+    if (c === "pause") {
+      const t = document.createElement("span");
+      t.className = "pause-thresh";
+      t.innerHTML = `最短停顿 <input type="number" step="0.1" min="0" value="${pauseMin}"> s`;
+      t.querySelector("input").addEventListener("input", e => {
+        pauseMin = parseFloat(e.target.value) || 0;
+        renderTranscript();
+        updateStats();
+      });
+      t.addEventListener("mousedown", e => e.stopPropagation());
+      row.appendChild(t);
+    }
+    row.querySelector("input[type=checkbox]").addEventListener("change", e => {
+      toggleCategory(c, e.target.checked);
+    });
+    host.appendChild(row);
+  }
+  document.getElementById("total-count").textContent = total;
+}
+
+function toggleCategory(cat, on) {
+  catVisible[cat] = on;
+  // Propagate: words belonging to this category get their checked state
+  // set to the new visibility (simple model: default when shown, not-deleted when hidden).
+  if (cat === "pause") {
+    pauseChecked = pauseChecked.map(() => on);
+  } else {
+    for (let wi = 0; wi < wordCategory.length; wi++) {
+      if (wordCategory[wi] === cat) wordChecked[wi] = on;
+    }
+  }
+  renderTranscript();
+  updateStats();
+}
+
+function renderTranscript() {
+  const host = document.getElementById("transcript");
+  const words = DATA.transcript.segments;
+  const parts = [];
+  // Build a flat timeline of (word or pause) in time order
+  // Pauses have .start in [lastWordEnd, nextWordStart]
+  const activePauses = pauseList
+    .map((p, pi) => ({ p, pi }))
+    .filter(x => (x.p.end - x.p.start) >= pauseMin);
+
+  let pIdx = 0;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    // Insert pauses that occur before this word
+    while (pIdx < activePauses.length && activePauses[pIdx].p.start < w.start) {
+      const { p, pi } = activePauses[pIdx];
+      const dur = p.end - p.start;
+      const act = catVisible.pause && pauseChecked[pi];
+      parts.push(`<span class="pause${act ? "" : " inactive"}" data-pi="${pi}">[...${dur.toFixed(1)}s]</span>`);
+      pIdx++;
+    }
+    parts.push(renderWord(i, w));
+  }
+  // Trailing pauses
+  while (pIdx < activePauses.length) {
+    const { p, pi } = activePauses[pIdx++];
+    const dur = p.end - p.start;
+    const act = catVisible.pause && pauseChecked[pi];
+    parts.push(`<span class="pause${act ? "" : " inactive"}" data-pi="${pi}">[...${dur.toFixed(1)}s]</span>`);
+  }
+  host.innerHTML = parts.join("");
+}
+
+function wordClass(wi) {
+  const cat = wordCategory[wi];
+  // Render pill styling when: (a) suggestion-covered word under a visible
+  // category, or (b) plain word manually checked via shift-click.
+  if (cat && catVisible[cat]) return "word cut " + (wordChecked[wi] ? "active" : "inactive");
+  if (!cat && wordChecked[wi])  return "word cut active";
+  return "word";
+}
+
+function renderWord(wi, w) {
+  return `<span class="${wordClass(wi)}" data-wi="${wi}">${esc(w.text)}</span>`;
+}
+
+function refreshWord(wi) {
+  const el = document.querySelector(`.word[data-wi="${wi}"]`);
+  if (!el) return;
+  el.className = wordClass(wi);
+  if (wi === playingWi) el.classList.add("playing");
+}
+
+// ========= Stats =========
+function effectiveCutRanges() {
+  // Merge consecutive checked words into time ranges, then add checked pauses.
+  const ranges = [];
+  const words = DATA.transcript.segments;
+  let runStart = null, runEnd = null;
+  const MERGE_GAP = 0.05; // merge consecutive checked words only if gap ≤ 50ms
+  for (let i = 0; i < words.length; i++) {
+    const cat = wordCategory[i];
+    // Plain words (no category) count when checked — users can shift-click
+    // any word to cut it. Category-covered words additionally require the
+    // category to be visible.
+    const on = wordChecked[i] && (!cat || catVisible[cat]);
+    if (on) {
+      if (runStart == null) {
+        runStart = words[i].start;
+        runEnd = words[i].end;
+      } else if (words[i].start - runEnd > MERGE_GAP) {
+        // gap too big — close previous run, start a new one
+        ranges.push([runStart, runEnd]);
+        runStart = words[i].start;
+        runEnd = words[i].end;
+      } else {
+        runEnd = words[i].end;
+      }
+    } else if (runStart != null) {
+      ranges.push([runStart, runEnd]);
+      runStart = runEnd = null;
+    }
+  }
+  if (runStart != null) ranges.push([runStart, runEnd]);
+  // Pauses
+  if (catVisible.pause) {
+    pauseList.forEach((p, pi) => {
+      if (pauseChecked[pi] && (p.end - p.start) >= pauseMin) {
+        const ta = p.start + 0.2, tb = p.end - 0.2;
+        if (tb - ta > 0.15) ranges.push([ta, tb]);
+      }
+    });
+  }
+  // Sort and merge overlapping / adjacent
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const r of ranges) {
+    if (merged.length && r[0] <= merged[merged.length - 1][1] + 0.05) {
+      merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], r[1]);
+    } else merged.push([...r]);
+  }
+  return merged;
+}
+
+function updateStats() {
+  const ranges = effectiveCutRanges();
+  const del = ranges.reduce((a, [s, e]) => a + (e - s), 0);
+  document.getElementById("stat-del").textContent = fmt(del);
+  document.getElementById("stat-out").textContent = fmt(Math.max(0, DATA.manifest.duration - del));
+}
+
+// ========= Playback =========
+function previewSkip() {
+  const vid = document.getElementById("vid");
+  const t = vid.currentTime;
+  const ranges = effectiveCutRanges();
+  for (const [a, b] of ranges) {
+    if (t >= a && t < b) {
+      vid.currentTime = Math.min(b + 0.01, DATA.manifest.duration - 0.05);
+      return;
+    }
+  }
+}
+
+function syncHighlight() {
+  const t = document.getElementById("vid").currentTime;
+  const words = DATA.transcript.segments;
+  // Binary search would be nicer; linear is fine for ~1k words
+  let newWi = -1;
+  for (let i = 0; i < words.length; i++) {
+    if (t >= words[i].start && t < words[i].end) { newWi = i; break; }
+  }
+  if (newWi !== playingWi) {
+    if (playingWi >= 0) {
+      const old = document.querySelector(`.word[data-wi="${playingWi}"]`);
+      if (old) old.classList.remove("playing");
+    }
+    if (newWi >= 0) {
+      const el = document.querySelector(`.word[data-wi="${newWi}"]`);
+      if (el) {
+        el.classList.add("playing");
+        // scroll into view if off-screen
+        const tr = document.getElementById("transcript");
+        const er = el.getBoundingClientRect();
+        const tr_r = tr.getBoundingClientRect();
+        if (er.top < tr_r.top || er.bottom > tr_r.bottom) {
+          el.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
+      }
+    }
+    playingWi = newWi;
+  }
+}
+
+// ========= Confirm =========
+async function confirmCuts() {
+  const btn = document.getElementById("confirm");
+  const cuts = effectiveCutRanges().map(([s, e]) => ({ start: s, end: e }));
+  if (!cuts.length && !confirm("没有勾选任何片段，确定什么都不剪吗？")) return;
+  btn.disabled = true;
+  document.getElementById("status").textContent = "提交中…";
+  try {
+    const r = await fetch("/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cuts }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    btn.classList.add("done");
+    btn.textContent = "已确认 ✓";
+    document.getElementById("status").textContent = "已确认，请回到终端等剪辑完成。可以关闭本页。";
+  } catch (e) {
+    btn.disabled = false;
+    document.getElementById("status").textContent = "提交失败：" + e.message;
+  }
+}
+
+// ========= Initialize state from DATA (factored out so tests can call it) =========
+function initStateFromData() {
+  const cats = DATA.suggestions.categories;
+  catVisible = {};
+  Object.entries(cats).forEach(([k, v]) => { catVisible[k] = !!v.default_checked; });
+  pauseMin = cats.pause ? cats.pause.min_duration : 0.8;
+  const nWords = DATA.transcript.segments.length;
+  wordCategory = new Array(nWords).fill(null);
+  wordChecked = new Array(nWords).fill(false);
+  for (const s of DATA.suggestions.suggestions) {
+    if (s.category === "pause") continue;
+    for (const wi of s.word_indices) {
+      wordCategory[wi] = s.category;
+      wordChecked[wi] = catVisible[s.category];
+    }
+  }
+  pauseList = DATA.suggestions.suggestions.filter(s => s.category === "pause");
+  pauseChecked = pauseList.map(() => catVisible.pause);
+}
+
+// ========= Export for tests =========
+if (typeof module !== "undefined") {
+  module.exports = {
+    setData: d => { DATA = d; },
+    initStateFromData, effectiveCutRanges, toggleCategory, renderTranscript,
+    setWordChecked: (wi, v) => { wordChecked[wi] = v; },
+    setPauseChecked: (pi, v) => { pauseChecked[pi] = v; },
+    setPauseMin: v => { pauseMin = v; },
+    get wordChecked() { return wordChecked; },
+    get catVisible() { return catVisible; },
+    get pauseChecked() { return pauseChecked; },
+    get pauseList() { return pauseList; },
+    get wordCategory() { return wordCategory; },
+    get pauseMin() { return pauseMin; },
+  };
+}
+
+boot().catch(e => {
+  document.body.innerHTML = `<pre style="color:red; padding:20px;">加载失败：${esc(e.message)}</pre>`;
+});
+</script>
+</body>
+</html>
