@@ -1,0 +1,33 @@
+{
+  "name": "smart-cut-monologue",
+  "owner": {
+    "name": "pierrelzw"
+  },
+  "metadata": {
+    "description": "Single-plugin marketplace for smart-cut-monologue"
+  },
+  "plugins": [
+    {
+      "name": "smart-cut-monologue",
+      "source": "./.",
+      "description": "Smart-cut monologue videos on Apple Silicon — mlx-qwen3-asr transcription + 剪映-style transcript-inline review UI + frame-accurate ffmpeg cut",
+      "version": "0.1.1",
+      "author": {
+        "name": "pierrelzw"
+      },
+      "repository": "https://github.com/pierrelzw/smart-cut-monologue",
+      "license": "MIT",
+      "keywords": [
+        "video",
+        "monologue",
+        "transcription",
+        "mlx",
+        "qwen3",
+        "ffmpeg",
+        "macos",
+        "apple-silicon"
+      ],
+      "category": "media-tools"
+    }
+  ]
+}
