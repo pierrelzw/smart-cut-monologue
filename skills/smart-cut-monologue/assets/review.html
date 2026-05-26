@@ -187,11 +187,11 @@ async function boot() {
     } else if (pause) {
       const pi = parseInt(pause.dataset.pi);
       if (e.shiftKey) {
-        if (catVisible.pause) {
-          pauseChecked[pi] = !pauseChecked[pi];
-          pause.classList.toggle("inactive", !pauseChecked[pi]);
-          updateStats();
-        }
+        // Symmetric to word shift-click: manual selection always wins,
+        // independent of the pause category checkbox.
+        pauseChecked[pi] = !pauseChecked[pi];
+        pause.classList.toggle("inactive", !pauseChecked[pi]);
+        updateStats();
       } else {
         vid.currentTime = pauseList[pi].start;
       }
@@ -282,7 +282,7 @@ function renderTranscript() {
     while (pIdx < activePauses.length && activePauses[pIdx].p.start < w.start) {
       const { p, pi } = activePauses[pIdx];
       const dur = p.end - p.start;
-      const act = catVisible.pause && pauseChecked[pi];
+      const act = pauseChecked[pi];
       parts.push(`<span class="pause${act ? "" : " inactive"}" data-pi="${pi}">[...${dur.toFixed(1)}s]</span>`);
       pIdx++;
     }
@@ -292,7 +292,7 @@ function renderTranscript() {
   while (pIdx < activePauses.length) {
     const { p, pi } = activePauses[pIdx++];
     const dur = p.end - p.start;
-    const act = catVisible.pause && pauseChecked[pi];
+    const act = pauseChecked[pi];
     parts.push(`<span class="pause${act ? "" : " inactive"}" data-pi="${pi}">[...${dur.toFixed(1)}s]</span>`);
   }
   host.innerHTML = parts.join("");
@@ -355,15 +355,15 @@ function effectiveCutRanges() {
     }
   }
   if (runStart != null) ranges.push([runStart, runEnd]);
-  // Pauses
-  if (catVisible.pause) {
-    pauseList.forEach((p, pi) => {
-      if (pauseChecked[pi] && (p.end - p.start) >= pauseMin) {
-        const ta = p.start + 0.2, tb = p.end - 0.2;
-        if (tb - ta > 0.15) ranges.push([ta, tb]);
-      }
-    });
-  }
+  // Pauses: pauseChecked is the sole truth, same as wordChecked. The
+  // category checkbox is just a bulk toggle (it sets pauseChecked en
+  // masse in toggleCategory), not a render-time gate.
+  pauseList.forEach((p, pi) => {
+    if (pauseChecked[pi] && (p.end - p.start) >= pauseMin) {
+      const ta = p.start + 0.2, tb = p.end - 0.2;
+      if (tb - ta > 0.15) ranges.push([ta, tb]);
+    }
+  });
   // Sort and merge overlapping / adjacent
   ranges.sort((a, b) => a[0] - b[0]);
   const merged = [];

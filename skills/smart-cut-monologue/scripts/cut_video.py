@@ -50,11 +50,17 @@ def normalize_deletes(cuts, duration):
             merged[-1][1] = max(merged[-1][1], r[1])
         else:
             merged.append(r[:])
-    # Second pass: absorb sub-SLIVER_KEEP gaps between deletes. These are the
-    # 50–300ms keep-slivers that survive MERGE_GAP but produce audible micro
-    # pauses and extra concat boundaries.
+    return merged
+
+
+def sliver_backstop(deletes):
+    """Last-resort: absorb sub-SLIVER_KEEP gaps between deletes regardless of
+    word content. Only meant to catch what absorb_wordless_gaps couldn't (e.g.
+    transcript.json missing or malformed). MUST run AFTER absorb_wordless_gaps
+    so the semantic check has first refusal — otherwise a kept span that holds
+    a real ≤300ms word would be silently merged away."""
     absorbed = []
-    for r in merged:
+    for r in deletes:
         if absorbed and r[0] - absorbed[-1][1] < SLIVER_KEEP:
             absorbed[-1][1] = max(absorbed[-1][1], r[1])
         else:
@@ -75,10 +81,17 @@ def absorb_wordless_gaps(deletes, workdir: Path, duration: float):
     misses sub-second inter-word gaps).
     """
     tj = workdir / "transcript.json"
-    if not tj.is_file() or len(deletes) < 2:
+    if not tj.is_file() or not deletes:
         return deletes
-    doc = json.loads(tj.read_text())
+    try:
+        doc = json.loads(tj.read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"cut: transcript.json unreadable, skipping wordless-gap absorb: {e}", file=sys.stderr)
+        return deletes
     segs = doc.get("segments", doc if isinstance(doc, list) else [])
+    if not segs:
+        print("cut: transcript.json had no recognizable 'segments' — skipping wordless-gap absorb.", file=sys.stderr)
+        return deletes
     # Skip zero-duration words: ASR sometimes emits multi-token bursts at a
     # single timestamp inside a silent region (no real audio). Counting them
     # as "present" would block legitimate silence absorption.
@@ -103,8 +116,9 @@ def absorb_wordless_gaps(deletes, workdir: Path, duration: float):
             merged[-1][1] = max(merged[-1][1], r[1])
         else:
             merged.append(r[:])
-    # Head only: a wordless region before the first delete is dead air the
-    # user couldn't tick — absorb. Tail is intentionally NOT symmetric: if
+    # Head: a wordless region before the first delete is dead air the user
+    # couldn't tick — absorb. Runs even for a single-delete clip (the most
+    # common single-filler case). Tail is intentionally NOT symmetric: if
     # the user didn't explicitly cut into the trailing silence, leave it
     # as ending breathing room.
     if merged[0][0] > 0 and not has_word(0.0, merged[0][0]):
@@ -219,7 +233,12 @@ def main():
     out_txt   = workdir / f"{stem}_cut.txt"
 
     deletes = normalize_deletes(cuts_doc.get("cuts", []), duration)
+    # Semantic pass first: absorb inter-delete gaps that contain no real word.
     deletes = absorb_wordless_gaps(deletes, workdir, duration)
+    # Dumb backstop last: any sub-300ms residue gets merged regardless of
+    # content. Runs *after* the semantic check so it can't destroy a real
+    # short word the user intentionally kept.
+    deletes = sliver_backstop(deletes)
     if not deletes:
         # User confirmed zero cuts → they want the original unchanged. Deliver
         # a copy under the _cut name so downstream consumers always see output.
