@@ -12,9 +12,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-MIN_DELETE = 0.10   # drop <100ms slivers
+MIN_DELETE = 0.10   # drop delete spans shorter than 100ms
 MIN_KEEP   = 0.05   # drop keep spans shorter than this
-MERGE_GAP  = 0.05   # merge deletes closer than 50ms
+MERGE_GAP  = 0.15   # merge deletes whose gap is ≤150ms (mirrors review.html;
+                    # covers ASR inter-word silences so adjacent ticked words
+                    # collapse into one delete)
+SLIVER_KEEP = 0.30  # backstop: any kept span between two deletes shorter
+                    # than this gets absorbed into the surrounding deletes.
+                    # Independent of UI to guarantee output cleanliness.
 FADE       = 0.005  # 5ms audio fade at concat boundaries
 
 
@@ -45,6 +50,66 @@ def normalize_deletes(cuts, duration):
             merged[-1][1] = max(merged[-1][1], r[1])
         else:
             merged.append(r[:])
+    # Second pass: absorb sub-SLIVER_KEEP gaps between deletes. These are the
+    # 50–300ms keep-slivers that survive MERGE_GAP but produce audible micro
+    # pauses and extra concat boundaries.
+    absorbed = []
+    for r in merged:
+        if absorbed and r[0] - absorbed[-1][1] < SLIVER_KEEP:
+            absorbed[-1][1] = max(absorbed[-1][1], r[1])
+        else:
+            absorbed.append(r[:])
+    return absorbed
+
+
+def absorb_wordless_gaps(deletes, workdir: Path, duration: float):
+    """Merge two adjacent deletes if the kept span between them contains no
+    transcript word (and is therefore audio-empty by ASR's reckoning).
+
+    User rule: silence at the head/tail of a kept passage is intentional
+    breathing room — leave it. But a kept sliver sandwiched between two
+    deletes, with no spoken word inside, is dead air that survived only
+    because the word-level UI can't tick non-word regions. Absorb it.
+
+    transcript.json is the source of truth (silencedetect's 0.6s threshold
+    misses sub-second inter-word gaps).
+    """
+    tj = workdir / "transcript.json"
+    if not tj.is_file() or len(deletes) < 2:
+        return deletes
+    doc = json.loads(tj.read_text())
+    segs = doc.get("segments", doc if isinstance(doc, list) else [])
+    # Skip zero-duration words: ASR sometimes emits multi-token bursts at a
+    # single timestamp inside a silent region (no real audio). Counting them
+    # as "present" would block legitimate silence absorption.
+    words = sorted(
+        (float(s["start"]), float(s["end"]))
+        for s in segs
+        if "start" in s and "end" in s and float(s["end"]) - float(s["start"]) > 0.01
+    )
+
+    def has_word(a, b):
+        for ws, we in words:
+            if ws >= b:
+                return False
+            if we > a:
+                return True
+        return False
+
+    merged = [deletes[0][:]]
+    for r in deletes[1:]:
+        gap_a, gap_b = merged[-1][1], r[0]
+        if gap_b > gap_a and not has_word(gap_a, gap_b):
+            merged[-1][1] = max(merged[-1][1], r[1])
+        else:
+            merged.append(r[:])
+    # Head only: a wordless region before the first delete is dead air the
+    # user couldn't tick — absorb. Tail is intentionally NOT symmetric: if
+    # the user didn't explicitly cut into the trailing silence, leave it
+    # as ending breathing room.
+    if merged[0][0] > 0 and not has_word(0.0, merged[0][0]):
+        merged[0][0] = 0.0
+    _ = duration  # kept for API symmetry; tail extension intentionally skipped
     return merged
 
 
@@ -154,6 +219,7 @@ def main():
     out_txt   = workdir / f"{stem}_cut.txt"
 
     deletes = normalize_deletes(cuts_doc.get("cuts", []), duration)
+    deletes = absorb_wordless_gaps(deletes, workdir, duration)
     if not deletes:
         # User confirmed zero cuts → they want the original unchanged. Deliver
         # a copy under the _cut name so downstream consumers always see output.

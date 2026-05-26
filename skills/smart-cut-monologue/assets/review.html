@@ -172,14 +172,15 @@ async function boot() {
         // Pure selection — don't seek, otherwise the seeked-event preview
         // skip immediately jumps the playhead away and the user can't see
         // what they just selected (and can't drag further).
-        const cat = wordCategory[wi];
-        if (!cat || catVisible[cat]) {
-          const newState = !wordChecked[wi];
-          wordChecked[wi] = newState;
-          dragAnchor = { newState, moved: false };
-          refreshWord(wi);
-          updateStats();
-        }
+        // Manual shift-click always wins, even on a word whose category
+        // checkbox is currently off — otherwise the only way to cut a few
+        // items in a category is "check the whole category, then uncheck
+        // the unwanted ones", which is the opposite of additive selection.
+        const newState = !wordChecked[wi];
+        wordChecked[wi] = newState;
+        dragAnchor = { newState, moved: false };
+        refreshWord(wi);
+        updateStats();
       } else {
         vid.currentTime = DATA.transcript.segments[wi].start;
       }
@@ -202,8 +203,6 @@ async function boot() {
     const word = e.target.closest(".word");
     if (!word) return;
     const wi = parseInt(word.dataset.wi);
-    const cat = wordCategory[wi];
-    if (cat && !catVisible[cat]) return;  // hidden category — skip
     if (wordChecked[wi] !== dragAnchor.newState) {
       wordChecked[wi] = dragAnchor.newState;
       dragAnchor.moved = true;
@@ -301,10 +300,10 @@ function renderTranscript() {
 
 function wordClass(wi) {
   const cat = wordCategory[wi];
-  // Render pill styling when: (a) suggestion-covered word under a visible
-  // category, or (b) plain word manually checked via shift-click.
-  if (cat && catVisible[cat]) return "word cut " + (wordChecked[wi] ? "active" : "inactive");
-  if (!cat && wordChecked[wi])  return "word cut active";
+  // Any checked word renders active, regardless of category visibility —
+  // shift-click overrides the category gate.
+  if (wordChecked[wi]) return "word cut active";
+  if (cat && catVisible[cat]) return "word cut inactive";
   return "word";
 }
 
@@ -325,13 +324,19 @@ function effectiveCutRanges() {
   const ranges = [];
   const words = DATA.transcript.segments;
   let runStart = null, runEnd = null;
-  const MERGE_GAP = 0.05; // merge consecutive checked words only if gap ≤ 50ms
+  const MERGE_GAP = 0.15; // merge consecutive checked words if gap ≤ 150ms.
+  // 150ms covers typical ASR inter-word silences (60–120ms) so that ticking
+  // a whole sentence collapses into one delete range rather than a row of
+  // word-sized deletes separated by sub-100ms kept slivers. cut_video.py
+  // applies the same threshold as a backstop.
   for (let i = 0; i < words.length; i++) {
     const cat = wordCategory[i];
     // Plain words (no category) count when checked — users can shift-click
     // any word to cut it. Category-covered words additionally require the
     // category to be visible.
-    const on = wordChecked[i] && (!cat || catVisible[cat]);
+    // Trust wordChecked: shift-click overrides category visibility, so
+    // category-gated filtering here would discard those manual selections.
+    const on = wordChecked[i];
     if (on) {
       if (runStart == null) {
         runStart = words[i].start;
@@ -363,7 +368,7 @@ function effectiveCutRanges() {
   ranges.sort((a, b) => a[0] - b[0]);
   const merged = [];
   for (const r of ranges) {
-    if (merged.length && r[0] <= merged[merged.length - 1][1] + 0.05) {
+    if (merged.length && r[0] <= merged[merged.length - 1][1] + 0.15) {
       merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], r[1]);
     } else merged.push([...r]);
   }
